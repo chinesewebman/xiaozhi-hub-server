@@ -887,9 +887,15 @@ class ConnectionHandler:
             self.config["selected_module"]["Intent"] = model_intent
             # 加载插件配置
             if model_intent != "Intent_nointent":
-                plugin_from_server = private_config.get("plugins", {})
-                for plugin, config_str in plugin_from_server.items():
-                    plugin_from_server[plugin] = json.loads(config_str)
+                # [xiaomianao] 后台私有配置只带它自己存过的那部分，
+                # 全局配置(data/.config.yaml)里手写的插件也必须一起给模型，
+                # 否则模型看不到这些工具，只会口头答应而不真的调用。
+                plugin_from_server = dict(self.config.get("plugins") or {})
+                for _plugin, _value in (private_config.get("plugins") or {}).items():
+                    plugin_from_server[_plugin] = _value
+                for plugin, config_str in list(plugin_from_server.items()):
+                    if isinstance(config_str, str):
+                        plugin_from_server[plugin] = json.loads(config_str)
                 # 将模块级别的插件配置复制到各具体函数名，
                 # 方便后续 per-function 查找描述、news_sources 等配置
                 for module_name, func_names in module_func_map.items():

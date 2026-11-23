@@ -137,6 +137,14 @@ PLUGINS = [
      "config": "home_assistant"},
     {"name": "search_from_ragflow", "label": "查知识库", "desc": "需要在配置文件的 plugins.search_from_ragflow 里填写 RAGFlow 地址和 Key",
      "config": "search_from_ragflow"},
+    {"name": "set_reminder", "label": "定时提醒", "desc": "设一个倒计时提醒（几分钟后提醒我关火之类）",
+     "config": "set_reminder"},
+    {"name": "list_reminders", "label": "查提醒", "desc": "查询当前还没到点的提醒",
+     "config": "list_reminders"},
+    {"name": "record_family_event", "label": "记一笔", "desc": "把一件家庭活动记进家庭账本",
+     "config": "record_family_event"},
+    {"name": "query_family_today", "label": "查家庭账本", "desc": "查今天家里发生过什么",
+     "config": "query_family_today"},
 ]
 PLUGIN_NAMES = {p["name"] for p in PLUGINS}
 
