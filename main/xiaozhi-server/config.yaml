@@ -183,7 +183,7 @@ plugins:
     # ragflow接口配置
     base_url: "http://192.168.0.8"
     # ragflow api访问令牌
-    api_key: "ragflow-xxx"
+    api_key: "<把 Mac 上 oMLX 的 api_key 填这里；不要提交真值>"
     # ragflow知识库id
     dataset_ids: ["123456789"]
   # 联网搜索插件配置（后台「意图识别」页的联网搜索旁边可以设置和测试）
@@ -196,7 +196,7 @@ plugins:
     # 接口地址：写到 /anthropic 或 /anthropic/v1 都可以
     base_url: "https://api.deepseek.com/anthropic/v1"
     # API Key
-    api_key: "你的api_key"
+    api_key: "<把 Mac 上 oMLX 的 api_key 填这里；不要提交真值>"
     # 搜索用的模型
     model: "deepseek-v4-flash"
     # 单次最多搜索几次（1-10）
@@ -702,11 +702,13 @@ LLM:
   ChatGLMLLM:
     # 定义LLM API类型
     type: openai
-    # glm-4-flash 是免费的，但是还是需要注册填写api_key的
-    # 可在这里找到你的api key https://bigmodel.cn/usercenter/proj-mgmt/apikeys
-    model_name: glm-4-flash
-    url: https://open.bigmodel.cn/api/paas/v4/
-    api_key: 你的chat-glm web key
+    # [本机] 指向 Mac 上的 oMLX —— 本地推理，不再出户
+    model_name: Qwen3.8-27B-Uncensored-MLX-4bit
+    url: http://192.168.3.123:8000/v1
+    api_key: "<把 Mac 上 oMLX 的 api_key 填这里；不要提交真值>"
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: false
   OllamaLLM:
     # 定义LLM API类型
     type: ollama
@@ -792,11 +794,13 @@ LLM:
 VLLM:
   ChatGLMVLLM:
     type: openai
-    # glm-4v-flash是智谱免费AI的视觉模型，需要先在智谱AI平台创建API密钥并获取api_key
-    # 可在这里找到你的api key https://bigmodel.cn/usercenter/proj-mgmt/apikeys
-    model_name: glm-4v-flash  # 智谱AI的视觉模型
-    url: https://open.bigmodel.cn/api/paas/v4/
-    api_key: 你的api_key
+    # [本机] 指向 Mac 上的 oMLX —— 本地视觉模型（同一个 Qwen3.8-27B）
+    model_name: Qwen3.8-27B-Uncensored-MLX-4bit
+    url: http://192.168.3.123:8000/v1
+    api_key: "<把 Mac 上 oMLX 的 api_key 填这里；不要提交真值>"
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: false
   QwenVLVLLM:
     type: openai
     model_name: qwen3.5-flash
@@ -818,7 +822,10 @@ TTS:
   EdgeTTS:
     # 定义TTS API类型
     type: edge
-    voice: zh-CN-XiaoxiaoNeural
+    # [音色] 晓伊：活泼俏皮的女声（用户选定）
+    voice: zh-CN-XiaoyiNeural
+    # 语速 +5%：再添一点轻快感（-100~100）
+    rate: 5
     output_dir: tmp/
     # language: "中文"  # 指定输出语种,如:中文、英语、日语、韩语等,请根据所选音色支持的语言进行设置,不填则默认为中文
   DoubaoTTS:
@@ -962,7 +969,7 @@ TTS:
     seed: null
     channels: 1
     rate: 44100
-    api_key: "你的api_key"
+    api_key: "<把 Mac 上 oMLX 的 api_key 填这里；不要提交真值>"
     api_url: "http://127.0.0.1:8080/v1/tts"
     # language: "中文"  # 指定输出语种,如:中文、英语、日语、韩语等,请根据所选音色支持的语言进行设置,不填则默认为中文
   GPT_SOVITS_V2:

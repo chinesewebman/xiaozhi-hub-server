@@ -198,6 +198,10 @@ class LLMProvider(LLMProviderBase):
         # 禁用思考模式
         self._apply_thinking_disabled(request_params)
 
+        logger.bind(tag=TAG).info(f"[LLM-REQ-2] model={request_params.get('model')} "
+                         f"base_url={self.base_url} "
+                         f"extra_body={request_params.get('extra_body')} "
+                         f"has_functions={'tools' in request_params}")
         stream = self.client.chat.completions.create(**request_params)
         self._track(session_id, stream)
 
