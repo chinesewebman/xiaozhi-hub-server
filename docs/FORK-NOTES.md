@@ -6,7 +6,9 @@
 - 上游：`justhalfbit/xiaozhi-hub-server`（MIT）
 - 分支策略：`main` 与上游保持一致，方便 `gh repo sync`；我们的改动都在 `xiaomianao` 分支
 - 部署目标：Lenovo ThinkSmart View（postmarketOS / aarch64）作为设备端，
-  Mac Studio 作为中枢机（本地 32B 大模型 + 家庭账本/提醒服务）
+  Mac Studio 作为中枢机（本地大模型 + 家庭账本/提醒服务）
+- 源头与部署：nas-d 上的克隆 `~/xiaozhi-hub-server` 是**唯一源头**，
+  改完用 `~/bin/sync-xiaozhi.sh`（`--restart` 顺带重启）同步到设备
 
 ## 这个 fork 解决的核心问题
 
@@ -80,6 +82,32 @@ for plugin, config_str in list(plugin_from_server.items()):
 配置：hub 地址 `FAMILY_HUB_URL`（默认 `http://192.168.3.123:8765`），
 设备凭据放在设备上的 `~/.family_hub_token`（权限 600）。
 
+### 4. `config.yaml`：LLM / VLLM 指向本机 oMLX
+
+设备上的对话与视觉都走 Mac Studio 的 oMLX（本地推理，不再出户）：
+
+| 条目 | 值 |
+|---|---|
+| `LLM.ChatGLMLLM` | `type: openai`，`url: http://192.168.3.123:8000/v1`，模型 `Qwen3.8-27B-Uncensored-MLX-4bit` |
+| `VLLM.ChatGLMVLLM` | 同上（Qwen3.8 也能看图） |
+| `extra_body` | `chat_template_kwargs.enable_thinking: false`（关思考，首字 0.1~0.2 秒） |
+
+**`api_key` 在仓库里一律是占位符**，真值只留在设备上（见下面的密钥规则）。
+
+### 5. `core/providers/llm/openai/openai.py`：记录每次 LLM 请求
+
+在共用��� `client.chat.completions.create` 之前加一行：
+
+```python
+logger.bind(tag=TAG).info(f"[LLM-REQ-2] model={request_params.get('model')} "
+                         f"base_url={self.base_url} "
+                         f"extra_body={request_params.get('extra_body')} "
+                         f"has_functions={'tools' in request_params}")
+```
+
+用途见下面的坑 #5：**每台设备记住的模型会覆盖本地配置**，只看 `config.yaml`
+永远看不出设备实际在用哪个模型。
+
 ## 踩过的坑（留给后来人）
 
 1. **对话历史会教坏模型。** `data/chat.db` 的 `messages` 表里如果存着
@@ -90,8 +118,30 @@ for plugin, config_str in list(plugin_from_server.items()):
    所以不能用服务端 TTS 队列做后台播报（拿不到活跃连接）。
 3. **诊断手法**：把 `core/providers/llm/openai/openai.py` 里 `response_with_functions`
    的 `request_params` 落盘，能看到真实发出的 messages/tools，再用最小请求复现对比。
+   （现在这条已经固化成代码里的 `[LLM-REQ-2]` 日志 ✔）
 4. `mac`/`linux` 上抓包前先确认绑定地址：上游 provider 默认只监听回环，
    局域网要显式改 `server.host`。
+5. **改本地 `config.yaml` 不等于改到设备在用的模型。** 每台设备在
+   `data/agent_sessions.json` 里记着它选中的**条目名**，连接时覆盖本地配置：
+
+   ```json
+   {"last_model": {"<设备 MAC>": {"model": "ChatGLMLLM"}}}
+   ```
+
+   要换设备用的模型，得写这个文件（或用后台的"切换模型"接口），
+   改 `config.yaml` 的 `model_name` 是没用的。→ **日志里看实际发出的 model 字段** ✔
+6. **`extra_body` 是 OpenAI SDK 的概念，curl 不会摊平它。** 用 SDK 时
+   `extra_body={"chat_template_kwargs": {...}}` 会被合并到请求体顶层；
+   直接用 curl 测时必须把 `chat_template_kwargs` 写在顶层，否则参数根本没送到。
+7. **密钥不能进同步清单。** 设备上的 `config.yaml` 存着 Mac oMLX 的明文
+   `api_key`，仓库里只有占位符 —— 所以 `~/bin/sync-xiaozhi.sh` **不**同步
+   `config.yaml`（同步会用占位符覆盖真值，设备的 LLM 直接连不上）。
+   改设备配置要手动改，同时把占位符版本更新回仓库。
+8. **scp 的 `~` 是在本地展开的。** `scp host:~/path` 里的 `~` 用**本地**用户
+   解析（nas-d 是 `webman`，设备是 `ubuntu`）→ 路径不存在。
+   跨用户必须写绝对路径 `/home/ubuntu/...`。
+9. **设备上的小智是镜像装的**，git 只是工作副本；部署靠
+   `~/bin/sync-xiaozhi.sh` 文件同步，不是 git pull。
 
 ## 相关仓库
 
