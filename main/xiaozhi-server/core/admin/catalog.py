@@ -145,6 +145,7 @@ PLUGINS = [
      "config": "record_family_event"},
     {"name": "query_family_today", "label": "查家庭账本", "desc": "查今天家里发生过什么",
      "config": "query_family_today"},
+    {"name": "take_photo", "label": "拍照看图", "desc": "用摄像头拍一张照片并让视觉模型看图回答"},
 ]
 PLUGIN_NAMES = {p["name"] for p in PLUGINS}
 
