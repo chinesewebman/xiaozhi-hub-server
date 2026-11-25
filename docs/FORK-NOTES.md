@@ -145,6 +145,37 @@ resp = vllm.client.chat.completions.create(model=vllm.model_name, messages=messa
 **还有**：模型不调工具时，别只查配置 —— 对话历史里如果有过「摄像头罢工」这类
 失败回复，模型会照着历史学、继续拒绝。清理 `chat.db` 的 `messages` 表即可恢复。
 
+### v4：不再阻塞 event loop（2026-11-25 补）
+
+`take_photo` 虽然是 `async def`，但内部两个调用都是**同步阻塞**的：
+
+- `_load_frame()` —— `subprocess.run` 跑 lcam + ffmpeg，约 3.3 秒
+- `_vision()` —— 同步 HTTP 调视觉模型，约 6 秒
+
+直接卡在 event loop 里，**拍照那 9 秒内语音打断、其它连接的请求、管理后台全部延迟**。
+
+改法（`b4947b1a`）：
+
+```python
+async with _CAMERA_LOCK:                       # 摄像头只有一台，串行化
+    image = await asyncio.to_thread(_load_frame)
+answer = await asyncio.to_thread(_vision, question, image, conn.config)
+```
+
+实测：拍照期间 hub 对 HTTP 请求的响应从「卡住 9 秒」降到 **7~20 毫秒**。
+
+顺带三个修正：
+
+- `asyncio.Lock` —— 两次拍照撞在一起会因设备被占用而失败
+- `_vision` 加 `timeout`（默认 60 秒）—— 避免模型卡住时工具一直挂着
+- 落点文件 `/run/thinksmart/camera/frame.jpg` 加新鲜度检查（默认 20 秒）——
+  过期就忽略，否则会把几分钟前的旧图当成刚拍的
+
+> 用 codegraph 探索调用链时发现的：
+> `take_photo → _load_frame → _capture_from_libcamera`、`_vision → create_instance`，
+> 以及 `register_function → module_func_map → auto_import_modules("plugins_func.functions")`
+> 的注册路径（hub fork 已在本地 `codegraph init` 过，可直接查）。
+
 ## 踩过的坑（留给后来人）
 
 1. **对话历史会教坏模型。** `data/chat.db` 的 `messages` 表里如果存着
