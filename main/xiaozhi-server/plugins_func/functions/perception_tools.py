@@ -1,7 +1,7 @@
 """
 感知工具：读「感知守护进程」的状态。
 
-设备上的 thinksmart-perception.service 常驻持有摄像头，每 3 秒做一次变化检测；
+设备上的 thinksmart-perception.service 常驻持有摄像头，每秒做一次变化检测；
 一旦画面有明显变化就截一张图送去识别，把结果写在 state.json 里。
 
 这个工具让助手不用真的拍照就能回答"现在房间里是什么情况""刚才是谁进来了"
@@ -9,7 +9,7 @@
 
 **不要和 take_photo 混用**：
   - look_around —— 读已有的观察结果，瞬时返回，不额外拍照
-  - take_photo —— 真的拍一张现在 的照片并看图（要 6~20 秒）
+  - take_photo —— 真的拍一张现在的照片并看图（实测 18 秒）
 """
 
 import json
