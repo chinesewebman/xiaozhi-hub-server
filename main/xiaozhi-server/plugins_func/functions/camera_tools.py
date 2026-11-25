@@ -289,6 +289,15 @@ def _vision(question: str, image: bytes, config: dict) -> str:
         kwargs["max_tokens"] = vllm.max_tokens
     if getattr(vllm, "temperature", None) is not None:
         kwargs["temperature"] = vllm.temperature
+    # 透传配置里的 extra_body —— 里面有 chat_template_kwargs.enable_thinking=False，
+    # 不透传的话视觉模型会先写一长串 reasoning：实测 7.27 秒而且回答被截断
+    # （content 只剩 8 字）；关掉 thinking 是 4.65 秒、内容完整。
+    # 配置里没写就自己关 —— 单图问答不需要思考，本地 oMLX 的域名也不在
+    # provider 的自动名单里。
+    extra = entry.get("extra_body")
+    if not (isinstance(extra, dict) and extra):
+        extra = {"chat_template_kwargs": {"enable_thinking": False}}
+    kwargs["extra_body"] = extra
 
     resp = vllm.client.chat.completions.create(**kwargs)
     return str(resp.choices[0].message.content or "").strip()
