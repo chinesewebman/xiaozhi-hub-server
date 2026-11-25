@@ -10,10 +10,13 @@
      再用 ffmpeg 转成竖屏 JPEG（传感器横装 90 度，逆时针转 270 度才是正竖屏）；
   3. 都没有就明确告诉模型"相机暂时拍不出照片"，而不是假装看过。
 
-拍到的图走**设备自己的** /mcp/vision/explain（hub 的视觉入口），
-视觉模型是 Mac 上的本地 oMLX Qwen3.8（本地推理，不出家门）。
+看图：直接在进程内调用配置里的视觉模型（VLLM），不走 HTTP。
+**不能绕 http://127.0.0.1:16688/mcp/vision/explain** —— hub 是 asyncio 单线程，
+工具在 event loop 里同步等自己的 HTTP 端口会死锁（表现为"图片传过来就卡住了"）。
 """
 
+import base64
+import copy
 import os
 import subprocess
 import sys
@@ -21,18 +24,10 @@ import tempfile
 import time
 from typing import TYPE_CHECKING, Optional
 
-import httpx
 from plugins_func.register import Action, ActionResponse, ToolType, register_function
 
 if TYPE_CHECKING:
     from core.connection import ConnectionHandler
-
-# hub 的视觉入口（同一个进程，127.0.0.1）
-VISION_URL = os.environ.get("VISION_URL", "http://127.0.0.1:16688/mcp/vision/explain")
-# 设备自己的 token（client 用的是 test-token）
-CLIENT_ID = os.environ.get("VISION_CLIENT_ID", "web_test_client")
-DEVICE_ID = os.environ.get("VISION_DEVICE_ID", "test_device")
-TOKEN = os.environ.get("VISION_TOKEN", "test-token")
 
 # 取帧的落点：外部程序可以往这里写现成的帧
 FRAME_DIR = os.environ.get("CAMERA_FRAME_DIR", "/run/thinksmart/camera")
@@ -48,11 +43,9 @@ CAPTURE_WIDTH = int(os.environ.get("CAMERA_WIDTH", "1280"))
 CAPTURE_HEIGHT = int(os.environ.get("CAMERA_HEIGHT", "960"))
 # AGC/AWB 要 20 帧左右才收敛，第 1 帧看起来像全黑
 CAPTURE_FRAMES = int(os.environ.get("CAMERA_FRAMES", "20"))
-CAPTURE_INDEX = int(os.environ.get("CAMERA_FRAME_INDEX", str(CAPTURE_FRAMES - 1)))
 
-# 视觉模型是本地 27B，看图要几秒，给足超时
-TIMEOUT = httpx.Timeout(60.0, connect=5.0)
-CAPTURE_TIMEOUT = 40
+# 视觉模型是本地 27B，看图要 20 秒左右
+TIMEOUT = int(os.environ.get("CAMERA_VISION_TIMEOUT", "120"))
 
 
 def _fail(what: str, exc: Exception) -> ActionResponse:
@@ -66,7 +59,7 @@ def _fail(what: str, exc: Exception) -> ActionResponse:
 def _capture_from_libcamera() -> Optional[bytes]:
     """用 libcamera 软 ISP 抓一帧彩色图，返回 JPEG 字节。
 
-    连抓 CAPTURE_FRAMES 帧让 AGC/AWB 收敛，取第 CAPTURE_INDEX 帧，
+    连抓 CAPTURE_FRAMES 帧让 AGC/AWB 收敛，取最后一帧，
     再用 ffmpeg 转成竖屏 JPEG。
     """
     env = dict(os.environ)
@@ -89,44 +82,25 @@ def _capture_from_libcamera() -> Optional[bytes]:
             f"--file={pattern}",
         ]
         try:
-            proc = subprocess.run(
-                cmd,
-                env=env,
-                capture_output=True,
-                timeout=CAPTURE_TIMEOUT,
-            )
-        except subprocess.TimeoutExpired:
-            # 超时也可能有帧落盘，继续往下走
-            proc = None
+            subprocess.run(cmd, env=env, capture_output=True, timeout=60)
+        except Exception:
+            pass
 
-        raw = None
-        expected = os.path.join(tmp, f"frame-cam0-stream0-{CAPTURE_INDEX:06d}.bin")
-        if os.path.exists(expected):
-            raw = expected
-        else:
-            # lcam 偶尔会少产一两帧，取编号最大的可用帧（>= 目标帧优先）
-            produced = []
-            for name in os.listdir(tmp):
-                if not name.endswith(".bin"):
-                    continue
-                stem = name.rsplit(".", 1)[0]
-                digits = stem.rsplit("-", 1)[-1]
-                if digits.isdigit():
-                    produced.append((int(digits), os.path.join(tmp, name)))
-            produced.sort()
-            at_or_after = [p for p in produced if p[0] >= CAPTURE_INDEX]
-            usable = at_or_after or produced
-            if not usable:
-                stderr = (proc.stderr.decode("utf-8", "ignore") if proc else "")[-400:]
-                raise RuntimeError(f"libcamera 没有产出任何帧。{stderr}")
-            raw = usable[0][1] if at_or_after else usable[-1][1]
-            sys.stderr.write(
-                "[camera_tools] 目标帧 %d 不在，退回第 %d 帧\n"
-                % (CAPTURE_INDEX, int(os.path.basename(raw).rsplit("-", 1)[-1].split(".")[0]))
-            )
+        produced = []
+        for name in os.listdir(tmp):
+            if not name.endswith(".bin"):
+                continue
+            digits = name.rsplit("-", 1)[-1].split(".")[0]
+            if digits.isdigit():
+                produced.append((int(digits), os.path.join(tmp, name)))
+        if not produced:
+            return None
+        produced.sort()
+        raw = produced[-1][1]
 
         jpg = os.path.join(tmp, "frame.jpg")
-        # XBGR8888 是 4 字节/像素（BGR + padding），用 bgr0 读；transpose=2 = 逆时针 90 度
+        # XBGR8888 是 4 字节/像素（BGR + padding），用 bgr0 读；
+        # transpose=2 = 逆时针 90 度
         subprocess.run(
             [
                 "ffmpeg",
@@ -149,7 +123,7 @@ def _capture_from_libcamera() -> Optional[bytes]:
             ],
             check=True,
             capture_output=True,
-            timeout=20,
+            timeout=30,
         )
         with open(jpg, "rb") as f:
             return f.read()
@@ -168,22 +142,53 @@ def _load_frame() -> Optional[bytes]:
     return _capture_from_libcamera()
 
 
-def _vision(question: str, image: bytes) -> str:
-    """把图交给 hub 的视觉入口，返回模型的描述。"""
-    files = {"image": ("frame.jpg", image, "image/jpeg")}
-    data = {"question": question}
-    headers = {
-        "Authorization": f"Bearer {TOKEN}",
-        "Client-Id": CLIENT_ID,
-        "Device-Id": DEVICE_ID,
+def _vision(question: str, image: bytes, config: dict) -> str:
+    """在进程内直接调用配置里的视觉模型，返回描述。
+
+    走 OpenAI 兼容的多模态格式（text + image_url 的 data URI），
+    和 core/api/vision_handler.py 用的是同一个模型。
+
+    **不能绕 http://127.0.0.1:16688/mcp/vision/explain** —— hub 是 asyncio 单线程，
+    工具在 event loop 里同步等自己的 HTTP 端口会死锁（表现为"图片传过来就卡住了"）。
+
+    也不能直接用 provider 的 response(session_id, dialogue) —— 那个签名是给
+    对话流用的，不是给单图问答的，dialogue 必须是 message 列表。
+    """
+    from core.utils.llm import create_instance
+
+    select_vllm = (config.get("selected_module") or {}).get("VLLM")
+    if not select_vllm:
+        raise RuntimeError("还没设置默认的视觉分析模块（selected_module.VLLM）")
+    entry = (config.get("VLLM") or {}).get(select_vllm) or {}
+    vllm_type = entry.get("type") or select_vllm
+    vllm = create_instance(vllm_type, entry)
+
+    image_b64 = base64.b64encode(image).decode("utf-8")
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": question},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"},
+                },
+            ],
+        }
+    ]
+
+    kwargs = {
+        "model": vllm.model_name,
+        "messages": messages,
+        "stream": False,
     }
-    with httpx.Client(timeout=TIMEOUT) as c:
-        r = c.post(VISION_URL, headers=headers, data=data, files=files)
-        r.raise_for_status()
-        obj = r.json()
-    if not obj.get("success"):
-        raise RuntimeError(obj.get("message") or "视觉接口返回失败")
-    return str(obj.get("response") or "").strip()
+    if getattr(vllm, "max_tokens", None):
+        kwargs["max_tokens"] = vllm.max_tokens
+    if getattr(vllm, "temperature", None) is not None:
+        kwargs["temperature"] = vllm.temperature
+
+    resp = vllm.client.chat.completions.create(**kwargs)
+    return str(resp.choices[0].message.content or "").strip()
 
 
 TAKE_PHOTO_DESC = {
@@ -231,7 +236,7 @@ async def take_photo(
         )
 
     try:
-        answer = _vision(question, image)
+        answer = _vision(question, image, conn.config)
     except Exception as e:  # noqa: BLE001
         return _fail("看图", e)
 

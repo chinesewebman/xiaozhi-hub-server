@@ -736,6 +736,33 @@ class ConnectionHandler:
                 role="assistant", content="再见，下次再聊~", is_temporary=True,
             ))
 
+
+        # 示例3：需要「眼睛」的问题 —— 必须先调 take_photo，不能凭空回答
+        # [xiaozhi-hub] 模型（尤其关掉 thinking 的小模型）容易直接编一句
+        # 「我暂时拍不了照片」，用 few-shot 明确告诉它这类问题要调工具。
+        if "take_photo" in tool_names:
+            tp_tc_id = "fewshot_photo_001"
+            self.dialogue.put(Message(role="user", content="帮我看看现在房间里有什么", is_temporary=True))
+            self.dialogue.put(Message(
+                role="assistant",
+                tool_calls=[{
+                    "id": tp_tc_id,
+                    "function": {"arguments": '{"question": "房间里有什么"}', "name": "take_photo"},
+                    "type": "function", "index": 0,
+                }],
+                is_temporary=True,
+            ))
+            self.dialogue.put(Message(
+                role="tool", tool_call_id=tp_tc_id,
+                content="照片里看到：一张床，床上有彩色毛绒玩具；灰蓝色墙面；白色衣柜；床头柜上放着杂物。",
+                is_temporary=True,
+            ))
+            self.dialogue.put(Message(
+                role="assistant",
+                content="我看到啦，房间里有张床，床上摆着一排彩色毛绒玩具，墙是灰蓝色的，右边有个白色衣柜，床头柜上堆着些杂物。",
+                is_temporary=True,
+            ))
+
         self.logger.bind(tag=TAG).debug("已注入工具调用 few-shot 示例")
 
     def _init_report_threads(self):
