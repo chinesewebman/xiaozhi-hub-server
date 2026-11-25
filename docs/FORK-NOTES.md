@@ -108,6 +108,43 @@ logger.bind(tag=TAG).info(f"[LLM-REQ-2] model={request_params.get('model')} "
 用途见下面的坑 #5：**每台设备记住的模型会覆盖本地配置**，只看 `config.yaml`
 永远看不出设备实际在用哪个模型。
 
+## 6. `plugins_func/functions/camera_tools.py`：设备拍照 + 本地视觉模型看图
+
+设备（Lenovo ThinkSmart View）上的 S5KC505A 摄像头走 libcamera v0.8 软 ISP，
+能出真实的 XBGR8888 彩色帧。`take_photo` 工具：抓 20 帧让 AGC/AWB 收敛、取最后一帧，
+`ffmpeg -vf transpose=2` 转成 960×1280 竖屏 JPEG，再交给本地视觉模型看图回答。
+
+**看图必须在进程内直接调模型，不能绕 `http://127.0.0.1:16688/mcp/vision/explain`。**
+hub 是单线程 asyncio，工具在 event loop 里同步等自己的 HTTP 端口会**死锁**
+（用户侧表现是「图片传过来就卡住了」，日志是「工具调用超时或异常」）。
+
+```python
+messages = [{
+    "role": "user",
+    "content": [
+        {"type": "text", "text": question},
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+    ],
+}]
+resp = vllm.client.chat.completions.create(model=vllm.model_name, messages=messages)
+```
+
+注意 provider 的 `response(session_id, dialogue)` 是给**对话流**用的，
+`dialogue` 必须是 message 列表 —— 拿它做单图问答会拿到 generator 或直接报错。
+
+配套的两处配置：
+
+- `config.yaml` 里 `tool_call_timeout` 要 **90**（默认 30 不够：取帧 3s + 看图 ~6s + 生成）
+- `Intent.function_call.functions` 里必须列出 `take_photo`，否则插件不加载、模型看不到
+
+**另外**：设备上原本还有一个 client 侧的 `self.camera.take_photo`（设备 MCP 上报），
+功能重复但**永远失败** —— client 是系统级服务，`PrivateDevices=yes` 导致进程的 `/dev`
+是空的，拿不到 `/dev/media0`。同名工具同时暴露会让模型挑到坏的那个，已从 client
+的 MCP TOOLS 里移除（幂等脚本 `~/todo/dnd/remove_client_take_photo.py`，已进 client 补丁包）。
+
+**还有**：模型不调工具时，别只查配置 —— 对话历史里如果有过「摄像头罢工」这类
+失败回复，模型会照着历史学、继续拒绝。清理 `chat.db` 的 `messages` 表即可恢复。
+
 ## 踩过的坑（留给后来人）
 
 1. **对话历史会教坏模型。** `data/chat.db` 的 `messages` 表里如果存着
