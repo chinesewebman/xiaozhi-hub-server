@@ -5,7 +5,8 @@
 去马赛克 + CCM/LSC），能出真实的 XBGR8888 彩色帧，1280x960@30fps。
 
 取帧路径（按优先级）：
-  1. 落点文件 /run/thinksmart/camera/frame.jpg（外部程序可以往这里写现成的帧）；
+  1. 落点文件 /run/thinksmart/camera/frame.jpg（外部程序可以往这里写现成的帧，
+     但只认**新鲜**的，见 FRAME_MAX_AGE）；
   2. libcamera + lcam：连抓 20 帧让 AGC/AWB 收敛，取最后一帧，
      再用 ffmpeg 转成竖屏 JPEG（传感器横装 90 度，逆时针转 270 度才是正竖屏）；
   3. 都没有就明确告诉模型"相机暂时拍不出照片"，而不是假装看过。
@@ -13,13 +14,15 @@
 看图：直接在进程内调用配置里的视觉模型（VLLM），不走 HTTP。
 **不能绕 http://127.0.0.1:16688/mcp/vision/explain** —— hub 是 asyncio 单线程，
 工具在 event loop 里同步等自己的 HTTP 端口会死锁（表现为"图片传过来就卡住了"）。
+
+并发：摄像头只有一个，两次拍照撞在一起会失败（设备被占用），
+所以用一把 asyncio.Lock 串行化。
 """
 
+import asyncio
 import base64
-import copy
 import os
 import subprocess
-import sys
 import tempfile
 import time
 from typing import TYPE_CHECKING, Optional
@@ -32,6 +35,8 @@ if TYPE_CHECKING:
 # 取帧的落点：外部程序可以往这里写现成的帧
 FRAME_DIR = os.environ.get("CAMERA_FRAME_DIR", "/run/thinksmart/camera")
 FRAME_PATH = os.path.join(FRAME_DIR, "frame.jpg")
+# 落点文件超过这个秒数就算过期 —— 不然会把一张几分钟前的旧图当成刚拍的
+FRAME_MAX_AGE = float(os.environ.get("CAMERA_FRAME_MAX_AGE", "20"))
 
 # libcamera 软 ISP 的运行环境（设备上装在 /opt/libcamera）
 LIBCAMERA_PREFIX = os.environ.get("LIBCAMERA_PREFIX", "/opt/libcamera")
@@ -45,7 +50,10 @@ CAPTURE_HEIGHT = int(os.environ.get("CAMERA_HEIGHT", "960"))
 CAPTURE_FRAMES = int(os.environ.get("CAMERA_FRAMES", "20"))
 
 # 视觉模型是本地 27B，看图要 20 秒左右
-TIMEOUT = int(os.environ.get("CAMERA_VISION_TIMEOUT", "120"))
+VISION_TIMEOUT = float(os.environ.get("CAMERA_VISION_TIMEOUT", "60"))
+
+# 摄像头只有一台，串行化避免两次拍照撞在一起
+_CAMERA_LOCK = asyncio.Lock()
 
 
 def _fail(what: str, exc: Exception) -> ActionResponse:
@@ -130,13 +138,15 @@ def _capture_from_libcamera() -> Optional[bytes]:
 
 
 def _load_frame() -> Optional[bytes]:
-    """拿一帧图：先看落点文件，再走 libcamera。"""
+    """拿一帧图：先看落点文件（只要新鲜的），再走 libcamera。"""
     try:
         if os.path.exists(FRAME_PATH):
-            with open(FRAME_PATH, "rb") as f:
-                data = f.read()
-            if data[:2] == b"\xff\xd8" or data[:8] == b"\x89PNG\r\n\x1a\n":
-                return data
+            age = time.time() - os.path.getmtime(FRAME_PATH)
+            if age <= FRAME_MAX_AGE:
+                with open(FRAME_PATH, "rb") as f:
+                    data = f.read()
+                if data[:2] == b"\xff\xd8" or data[:8] == b"\x89PNG\r\n\x1a\n":
+                    return data
     except OSError:
         pass
     return _capture_from_libcamera()
@@ -181,6 +191,7 @@ def _vision(question: str, image: bytes, config: dict) -> str:
         "model": vllm.model_name,
         "messages": messages,
         "stream": False,
+        "timeout": VISION_TIMEOUT,
     }
     if getattr(vllm, "max_tokens", None):
         kwargs["max_tokens"] = vllm.max_tokens
@@ -223,7 +234,11 @@ async def take_photo(
     """拍一张照，用视觉模型看图回答。"""
     question = (question or "这张图里有什么？").strip()
     try:
-        image = _load_frame()
+        # 取帧和看图都是阻塞操作（subprocess / 同步 HTTP），
+        # 放到线程里跑，别把 hub 的 event loop 卡住 —— 卡住的话
+        # 语音打断、其它连接的请求都会延迟。
+        async with _CAMERA_LOCK:
+            image = await asyncio.to_thread(_load_frame)
     except Exception as e:  # noqa: BLE001
         return _fail("拍照", e)
 
@@ -236,7 +251,7 @@ async def take_photo(
         )
 
     try:
-        answer = _vision(question, image, conn.config)
+        answer = await asyncio.to_thread(_vision, question, image, conn.config)
     except Exception as e:  # noqa: BLE001
         return _fail("看图", e)
 
