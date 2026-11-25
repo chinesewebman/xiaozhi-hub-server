@@ -22,6 +22,7 @@
 import asyncio
 import base64
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -32,9 +33,19 @@ from plugins_func.register import Action, ActionResponse, ToolType, register_fun
 if TYPE_CHECKING:
     from core.connection import ConnectionHandler
 
-# 取帧的落点：外部程序可以往这里写现成的帧
+# 取帧的落点：外部程序（感知守护进程）可以往这里写现成的帧
 FRAME_DIR = os.environ.get("CAMERA_FRAME_DIR", "/run/thinksmart/camera")
 FRAME_PATH = os.path.join(FRAME_DIR, "frame.jpg")
+
+# 感知守护进程（thinksmart-perception.service）常驻持有摄像头，
+# 把帧流写在 STREAM_DIR 里，每秒只留几帧。它在的时候我们**不能**自己跑 lcam
+# （摄像头只有一个，会 "Device or resource busy"），只能从它那儿取帧。
+STREAM_DIR = os.environ.get("CAMERA_STREAM_DIR", "/tmp/thinksmart-perception")
+# 感知守护进程的出图尺寸（必须和它的 PERCEPTION_FRAME_* 一致，
+# 不然 raw 的字节数对不上，ffmpeg 会解出错位）
+STREAM_WIDTH = int(os.environ.get("CAMERA_STREAM_WIDTH", "640"))
+STREAM_HEIGHT = int(os.environ.get("CAMERA_STREAM_HEIGHT", "480"))
+
 # 落点文件超过这个秒数就算过期 —— 不然会把一张几分钟前的旧图当成刚拍的
 FRAME_MAX_AGE = float(os.environ.get("CAMERA_FRAME_MAX_AGE", "20"))
 
@@ -137,8 +148,79 @@ def _capture_from_libcamera() -> Optional[bytes]:
             return f.read()
 
 
+def _latest_stream_frame():
+    """从感知守护进程的流目录里取最新一帧的路径（没有则 None）。"""
+    try:
+        names = os.listdir(STREAM_DIR)
+    except OSError:
+        return None
+    best = None
+    for n in names:
+        if not n.endswith(".bin"):
+            continue
+        stem = n.rsplit("-", 1)[-1].split(".")[0]
+        if stem.isdigit():
+            seq = int(stem)
+            if best is None or seq > best[0]:
+                best = (seq, os.path.join(STREAM_DIR, n))
+    return best[1] if best else None
+
+
+def _raw_to_jpeg(src, dst, width, height):
+    """raw(XBGR8888) -> 竖屏 JPEG。返回 True/False。"""
+    tmp = dst + ".tmp.jpg"   # ffmpeg 靠扩展名认格式
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-v", "error", "-y",
+                "-f", "rawvideo", "-pixel_format", "bgr0",
+                "-video_size", "%dx%d" % (width, height),
+                "-i", src,
+                "-vf", "transpose=2",
+                "-q:v", "3",
+                tmp,
+            ],
+            check=True, capture_output=True, timeout=30,
+        )
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
+    if os.path.exists(tmp) and os.path.getsize(tmp) > 0:
+        os.replace(tmp, dst)
+        return True
+    return False
+
+
+def _capture_from_stream() -> Optional[bytes]:
+    """从感知守护进程的流里取一帧（守护进程占着摄像头时的唯一办法）。"""
+    src = _latest_stream_frame()
+    if not src:
+        return None
+    with tempfile.TemporaryDirectory(prefix="thinksmart-cam-") as tmp:
+        # 先复制出来 —— 守护进程会随时删旧帧，直接读可能读一半就没了
+        raw = os.path.join(tmp, "frame.bin")
+        try:
+            shutil.copyfile(src, raw)
+        except OSError:
+            return None
+        jpg = os.path.join(tmp, "frame.jpg")
+        if not _raw_to_jpeg(raw, jpg, STREAM_WIDTH, STREAM_HEIGHT):
+            return None
+        with open(jpg, "rb") as f:
+            return f.read()
+
+
 def _load_frame() -> Optional[bytes]:
-    """拿一帧图：先看落点文件（只要新鲜的），再走 libcamera。"""
+    """拿一帧图。
+
+    优先级：
+      1. 落点文件（感知守护进程在检测到变化时写的）—— 只要新鲜就用；
+      2. 感知守护进程的流目录里取最新一帧（守护进程在跑时的常态路径）；
+      3. 自己跑 lcam（守护进程没跑时的兜底）。
+    """
     try:
         if os.path.exists(FRAME_PATH):
             age = time.time() - os.path.getmtime(FRAME_PATH)
@@ -149,6 +231,16 @@ def _load_frame() -> Optional[bytes]:
                     return data
     except OSError:
         pass
+
+    # 守护进程在跑？直接从它的流里取
+    if _latest_stream_frame():
+        try:
+            data = _capture_from_stream()
+            if data:
+                return data
+        except Exception:
+            pass
+
     return _capture_from_libcamera()
 
 
